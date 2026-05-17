@@ -28,6 +28,10 @@ async function navigate(page) {
   const hash = page || window.location.hash.slice(1) || 'dashboard';
   if (!hash) { window.location.hash = 'dashboard'; return; }
 
+  // Show loading bar
+  const bar = document.getElementById('topLoadingBar');
+  if (bar) { bar.classList.add('active'); bar.style.width = '30%'; }
+
   document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
   const navItem = document.querySelector(`[data-page="${hash}"]`);
   if (navItem) navItem.classList.add('active');
@@ -45,12 +49,16 @@ async function navigate(page) {
     if (renderFn) {
       content.innerHTML = '';
       content.className = 'page-content page-enter';
+      if (bar) bar.style.width = '70%';
       await renderFn();
+      if (bar) { bar.style.width = '100%'; setTimeout(() => { bar.style.width = '0'; bar.classList.remove('active'); }, 400); }
     } else {
       content.innerHTML = `<div class="empty-state"><div class="empty-state-icon">🔍</div><div class="empty-state-title">Page not found</div><div class="empty-state-desc">The page "${hash}" doesn't have a render function</div></div>`;
+      if (bar) { bar.style.width = '0'; bar.classList.remove('active'); }
     }
   } catch (err) {
     content.innerHTML = `<div class="empty-state"><div class="empty-state-icon">⚠</div><div class="empty-state-title">Failed to load</div><div class="empty-state-desc">${escapeHtml(err.message)}</div><button class="btn btn-primary mt-3" onclick="navigate('dashboard')">Go to Dashboard</button></div>`;
+    if (bar) { bar.style.width = '0'; bar.classList.remove('active'); }
   }
 }
 

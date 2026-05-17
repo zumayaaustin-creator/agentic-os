@@ -11,9 +11,10 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
 <body>
+  <div id="topLoadingBar"></div>
   <nav id="sidebar" class="sidebar">
     <div class="sidebar-header">
-      <div class="logo">
+      <div class="logo" onclick="navigate('dashboard')" style="cursor:pointer" title="Go to Dashboard">
         <svg class="logo-svg" viewBox="0 0 36 36" width="36" height="36">
           <defs><linearGradient id="lg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#6c5ce7"/><stop offset="100%" stop-color="#fd79a8"/></linearGradient></defs>
           <rect x="2" y="2" width="32" height="32" rx="10" fill="url(#lg)" opacity="0.15"/>

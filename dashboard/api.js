@@ -4,8 +4,10 @@ const api = {
     if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `Request failed: ${r.status}`); }
     return r.json();
   },
-  async post(path, body = {}) {
-    const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  async post(path, body = {}, controller) {
+    const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+    if (controller) opts.signal = controller.signal;
+    const r = await fetch(path, opts);
     if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `Request failed: ${r.status}`); }
     return r.json();
   },
@@ -43,6 +45,6 @@ const api = {
   updateSettings: (settings) => api.put('/api/settings', { settings }),
   getStandards: () => api.get('/api/standards'),
   discoverStandards: () => api.post('/api/standards/discover'),
-  chat: (agent, message) => api.post('/api/chat', { agent, message }),
+  chat: (agent, message, controller) => api.post('/api/chat', { agent, message }, controller),
   getChatHistory: () => api.get('/api/chat/history'),
 };

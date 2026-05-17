@@ -21,7 +21,17 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-app = FastAPI(title="Agentic OS", version="1.0.0")
+app = FastAPI(title="Agentic OS", version="1.1.0")
+
+# Load OpenRouter API key from Hermes .env
+HERMES_ENV = Path.home() / ".hermes" / ".env"
+if HERMES_ENV.exists():
+    for line in HERMES_ENV.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            if k == "OPENROUTER_API_KEY":
+                os.environ[k] = v  # last value wins (matches shell sourcing)
 
 # CORS for local dev
 app.add_middleware(
@@ -85,34 +95,28 @@ def append_audit(entry: dict):
     with open(audit_file, "a") as f:
         f.write(json.dumps(entry) + "\n")
 
-# ─── Agent Discovery (with cache) ─────────────────────────────────
-
-_agent_cache = {}
-_agent_cache_time = 0
+# ─── Agent Discovery (instant filesystem checks) ────────────────────
 
 def check_agent(name: str) -> dict:
-    global _agent_cache, _agent_cache_time
-    now = time.time()
-    if now - _agent_cache_time < 15 and name in _agent_cache:
-        return _agent_cache[name]
+    """Instant filesystem-based check. No subprocess needed."""
     try:
         if name == "opencode":
-            r = subprocess.run(["opencode", "--version"], capture_output=True, text=True, timeout=3)
-            status = "online" if r.returncode == 0 else "error"
+            exists = shutil.which("opencode") is not None
+            status = "online" if exists else "offline"
         elif name == "hermes":
-            r = subprocess.run(["hermes", "--version"], capture_output=True, text=True, timeout=3)
-            status = "online" if r.returncode == 0 else "error"
+            exists = shutil.which("hermes") is not None
+            status = "online" if exists else "offline"
         elif name == "gemini":
-            r = subprocess.run(["gemini", "--version"], capture_output=True, text=True, timeout=3)
-            status = "online" if r.returncode == 0 else "error"
+            # Gemini has valid OAuth tokens logged in
+            oauth = Path.home() / ".gemini" / "oauth_creds.json"
+            exists = shutil.which("gemini") is not None
+            logged_in = oauth.exists() and "ya29" in oauth.read_text()
+            status = "online" if exists and logged_in else "offline" if not exists else "warning"
         else:
             status = "offline"
     except Exception:
         status = "offline"
-    result = {"name": name, "status": status}
-    _agent_cache[name] = result
-    _agent_cache_time = now
-    return result
+    return {"name": name, "status": status}
 
 # ─── Routes: Status ───────────────────────────────────────────────
 
@@ -445,37 +449,105 @@ def save_chat_message(msg: dict):
         history["messages"] = history["messages"][-200:]
     CHAT_HISTORY_FILE.write_text(json.dumps(history, indent=2))
 
+def run_cli(args: list, timeout: int = 30) -> tuple:
+    r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    return r.returncode, r.stdout, r.stderr
+
+def clean_hermes_output(raw: str) -> str:
+    """Strip CLI metadata from Hermes output, returning only the AI response."""
+    if not raw:
+        return ""
+    lines = raw.split('\n')
+    in_box = False
+    content_lines = []
+    for line in lines:
+        if '╭─' in line:
+            in_box = True
+            continue
+        if '╰─' in line:
+            in_box = False
+            continue
+        if in_box:
+            # Remove ANSI escape codes and leading whitespace
+            cleaned = line.strip()
+            if cleaned:
+                content_lines.append(cleaned)
+    if content_lines:
+        return '\n'.join(content_lines)
+    # Fallback: if no box found, return last non-metadata line
+    non_meta = [l.strip() for l in lines if l.strip() and not l.startswith(('Query:', 'Initializing', '──', 'Resume', 'Session:', 'Duration:', 'Messages:'))]
+    return '\n'.join(non_meta[-5:]) or raw
+
 def execute_agent(agent: str, message: str) -> str:
     try:
         if agent == "opencode":
-            r = subprocess.run(
-                ["opencode", "run", message],
-                capture_output=True, text=True, timeout=12
-            )
-            out = (r.stdout or "") + (r.stderr or "")
-            if r.returncode == 0:
-                return out if out.strip() else f"✓ opencode received your message.\n\n**Message:** {message}\n\n> opencode is processing this in its interactive session. For a full response, run `opencode run \"{message[:60]}\"` in your terminal."
-            return out or f"opencode returned exit code {r.returncode}"
+            try:
+                code, out, err = run_cli(["opencode", "run", "--format", "json", message], timeout=30)
+            except subprocess.TimeoutExpired:
+                return f"⏱ Agent 'opencode' timed out.\n\nOpenCode's model is taking too long. Try running `opencode run \"{message[:60]}\"` directly in your terminal.\n\n**Message:** {message[:100]}"
+            if code == 0:
+                response_text = ""
+                for line in (out or "").split('\n'):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                        if event.get("type") == "text":
+                            text = event.get("part", {}).get("text", "")
+                            if text:
+                                response_text += text + "\n"
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+                if response_text:
+                    return response_text.strip()
+                return f"**opencode**\n\nProcessed your message.\n\n**Message:** {message[:100]}"
+            err_msg = (err or "").strip()
+            return err_msg or f"opencode returned exit code {code}"
+
         elif agent == "hermes":
-            r = subprocess.run(
-                ["hermes", "--message", message],
-                capture_output=True, text=True, timeout=12
-            )
-            out = (r.stdout or "") + (r.stderr or "")
-            return out if out.strip() else f"✓ Dispatched to Hermes.\n\n**Message:** {message}"
+            try:
+                code, out, err = run_cli(["hermes", "chat", "-q", message], timeout=180)
+            except subprocess.TimeoutExpired:
+                return f"⏱ Hermes timed out.\n\nThe model took too long to respond. Try a shorter query or check your OpenRouter rate limits.\n\n**Message:** {message[:100]}"
+            if code == 0:
+                cleaned = clean_hermes_output(out or "")
+                if cleaned:
+                    return cleaned
+                # Empty response from model - return useful fallback
+                return f"**Hermes**\n\nReceived your message but the model returned an empty response. Try rephrasing your query.\n\n**Message:** {message}"
+            err_msg = (err or "").strip()
+            if "invalid choice" in err_msg or "usage:" in err_msg:
+                return f"**Hermes needs setup**\n\nRun `hermes setup` or check your config.\n\n**Details:** {err_msg[:200]}"
+            return err_msg or f"hermes returned exit code {code}"
+
         elif agent == "gemini":
-            r = subprocess.run(
-                ["gemini", "ask", message],
-                capture_output=True, text=True, timeout=30
-            )
-            out = (r.stdout or "") + (r.stderr or "")
-            return out if out.strip() else f"✓ Sent to Gemini CLI.\n\n**Message:** {message}"
+            for attempt, (args, to) in enumerate([
+                (["-y", "-m", "gemini-2.5-flash"], 60),
+                (["-y"], 40),
+            ]):
+                try:
+                    code, out, err = run_cli(["gemini", *args, message], timeout=to)
+                except subprocess.TimeoutExpired:
+                    if attempt == 0:
+                        continue
+                    return f"⏱ Gemini timed out.\n\nTry running `gemini \"{message[:60]}\"` directly.\n\n**Message:** {message[:100]}"
+                if code == 0:
+                    return (out or "").strip() or f"**Gemini CLI**\n\nProcessed your query.\n\n**Message:** {message}"
+                err_msg = (err or "").strip()
+                if attempt == 0 and ("model" in err_msg.lower() or "not found" in err_msg.lower()):
+                    continue
+                if "auth" in err_msg.lower() or "login" in err_msg.lower():
+                    return f"**Gemini needs re-auth**\n\nRun `gemini auth login` to re-authenticate.\n\n**Details:** {err_msg[:200]}"
+                return err_msg or f"gemini returned exit code {code}"
+            return "Gemini CLI did not return a response."
+
         else:
             return f"Unknown agent: {agent}"
     except subprocess.TimeoutExpired:
-        return f"⏱ Agent '{agent}' took too long to respond.\n\nYour message has been dispatched. For a full response, run the agent CLI directly in your terminal.\n\n**Message:** {message[:100]}"
+        return f"⏱ Agent '{agent}' timed out.\n\nRun `{agent} --help` in your terminal for CLI usage.\n\n**Message:** {message[:100]}"
     except FileNotFoundError:
-        return f"⚠ Agent '{agent}' CLI is not installed. Run `pip install {agent}` or install it manually."
+        return f"⚠ Agent '{agent}' CLI not installed. Install it and try again."
     except Exception as e:
         return f"⚠ Error communicating with {agent}: {str(e)}"
 

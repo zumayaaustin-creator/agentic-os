@@ -47,17 +47,20 @@ async function viewPrompt(name) {
 
   const displayName = name.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 
+  // Store raw content for clipboard copy (avoids HTML entity encoding issue)
+  window._promptCopyContent = content;
+
   showModal(`Prompt: ${displayName}`, `
     <pre style="white-space:pre-wrap;font-size:12px;max-height:60vh;overflow:auto">${escapeHtml(content)}</pre>
   `, `
-    <button class="btn btn-primary" onclick="copyPromptContent('${escapeHtml(content).replace(/'/g, "\\'")}')">📋 Copy</button>
+    <button class="btn btn-primary" onclick="copyPromptFromModal()">📋 Copy</button>
     <button class="btn btn-ghost" onclick="closeModal()">Close</button>
   `);
 }
 
-function copyPromptContent(text) {
-  const decoded = text.replace(/\\'/g, "'");
-  navigator.clipboard.writeText(decoded).then(() => {
+function copyPromptFromModal() {
+  const text = window._promptCopyContent || '';
+  navigator.clipboard.writeText(text).then(() => {
     showToast('Copied to clipboard', 'success');
   }).catch(() => {
     showToast('Failed to copy', 'error');

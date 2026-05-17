@@ -37,7 +37,8 @@ function renderSkillGrid(skills) {
     const lastScore = s.scores && s.scores.length > 0 ? s.scores[s.scores.length - 1] : null;
     const avg = lastScore && lastScore.criteria_scores ? (lastScore.criteria_scores.reduce((a, b) => a + b, 0) / lastScore.criteria_scores.length) : null;
     const icons = ['⚡', '🔧', '📝', '🔍', '🔄', '🎯', '📊', '🛠', '💡', '🧪', '📋', '💾', '💰', '🔄', '🎨'];
-    const icon = icons[Math.floor(Math.random() * icons.length)];
+    const iconIdx = s.name.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % icons.length;
+    const icon = icons[iconIdx];
     return `<div class="skill-card" onclick="showSkillDetail('${s.name}')">
       <div class="skill-card-header">
         <div class="skill-card-icon">${icon}</div>

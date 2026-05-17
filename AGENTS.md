@@ -14,6 +14,7 @@ Your role is to act as the **kernel** of this system: route tasks to the right a
 |-------|-------|
 | **Name** | Agentic OS |
 | **Location** | `/home/mihir/Desktop/Agentic OS Project/` |
+| **GitHub** | [github.com/modimihir07/agentic-os](https://github.com/modimihir07/agentic-os) |
 | **Author** | Mihir N Modi (Gujarat, India — BTech CSE 1st year) |
 | **Created** | May 17, 2026 |
 | **License** | MIT |
@@ -314,7 +315,7 @@ Your role is to act as the **kernel** of this system: route tasks to the right a
 | **Active Project** | CloudMart — GCP DevOps multi-region e-commerce platform |
 | **Other Projects** | AgriAssist AI, Hermes Agent/OpenClaw, EROS Wellness AI, Java OOP practice |
 | **CLI Tools Available** | opencode, Hermes Agent, Gemini CLI |
-| **Preferred Model** | deepseek-v4-flash-free |
+| **Preferred Model** | Hermes: Owl Alpha (OpenRouter, free), opencode: deepseek-v4-flash-free (opencode-zen), Gemini: gemini-2.5-flash (Google OAuth) |
 | **Obsidian Vaults** | 4 vaults: DevOps, DeepSeek Chat, AI/ML, SEM-2 Academics (192 files) |
 
 ---
@@ -342,6 +343,11 @@ When you (an AI agent) are dropped into this directory for the first time:
 - This AGENTS.md file is the single source of truth
 - Any AI agent reading this file should have enough context to continue seamlessly
 - The agent should first read this file, then `brain/*`, then `data/settings.json`
+
+### Session History
+- opencode: `~/.local/share/opencode/opencode.db` + `~/.local/share/opencode/log/`
+- Hermes: `~/.hermes/sessions.json`
+- Gemini: `~/.gemini/history/`
 
 ---
 
@@ -379,6 +385,7 @@ When you (an AI agent) are dropped into this directory for the first time:
 | Date | Version | Changes |
 |------|---------|---------|
 | May 17, 2026 | v1.0.0 | Initial creation — all 51 features + 10 extras |
+| May 17, 2026 | v1.1.0 | AI Chat fixes: corrected CLI syntax (hermes `chat -q`, gemini positional), switched Hermes default to OpenRouter + Owl Alpha, improved timeout/error handling, updated execute_agent fallback logic |
 
 ---
 

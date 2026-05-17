@@ -129,7 +129,11 @@ async function sendChatMessage() {
   const typingId = showTypingIndicator(agent);
 
   try {
-    const r = await api.chat(agent, message);
+    // Client-side timeout: 200s (slightly more than Hermes' 180s backend timeout)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 200000);
+    const r = await api.chat(agent, message, controller);
+    clearTimeout(timeoutId);
     removeTypingIndicator(typingId);
     addChatMessage('assistant', r.response.content, agent);
 
@@ -138,7 +142,8 @@ async function sendChatMessage() {
     window._chatHistory.push({ role: 'assistant', content: r.response.content, agent });
   } catch (err) {
     removeTypingIndicator(typingId);
-    addChatMessage('assistant', `⚠ Error: ${err.message}`, agent);
+    const msg = err.name === 'AbortError' ? 'Request timed out after 200s' : err.message;
+    addChatMessage('assistant', `⚠ Error: ${msg}`, agent);
   }
 }
 

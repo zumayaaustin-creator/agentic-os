@@ -7,3 +7,7 @@ node_modules/
 .DS_Store
 *.tar.gz
 backups/*.tar.gz
+audit/*
+data/settings.json
+data/chat-history.json
+data/cost-history.json
