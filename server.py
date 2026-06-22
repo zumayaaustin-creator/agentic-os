@@ -6,9 +6,11 @@ Multi-agent orchestration server for opencode, Hermes, Gemini CLI
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -19,7 +21,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 app = FastAPI(title="Agentic OS", version="1.1.0")
 
@@ -69,6 +71,12 @@ class ChatRequest(BaseModel):
     agent: str
     message: str
 
+class CostRecord(BaseModel):
+    agent: str = "unknown"
+    model: str = "unknown"
+    tokens: int = Field(0, ge=0, le=10_000_000)
+    cost: float = Field(0.0, ge=0.0, le=1_000_000.0)
+
 # ─── Helper Functions ─────────────────────────────────────────────
 
 def read_file(path: Path):
@@ -85,15 +93,40 @@ def list_dir(path: Path):
         return []
     return sorted([p.name for p in path.iterdir() if not p.name.startswith(".")])
 
+def safe_child(parent: Path, name: str) -> Path:
+    """Resolve `name` under `parent` and refuse anything that escapes the parent dir."""
+    if not name or any(sep in name for sep in ("\x00",)):
+        raise HTTPException(400, "Invalid path")
+    parent_resolved = parent.resolve()
+    try:
+        candidate = (parent / name).resolve()
+    except (OSError, RuntimeError):
+        raise HTTPException(400, "Invalid path")
+    if candidate != parent_resolved and parent_resolved not in candidate.parents:
+        raise HTTPException(400, "Invalid path")
+    return candidate
+
+# Match short uuid ids, kanban filenames, session ids — alphanumeric + hyphen/underscore only.
+ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+def validate_id(value: str, label: str = "id") -> str:
+    if not value or not ID_RE.match(value):
+        raise HTTPException(400, f"Invalid {label}")
+    return value
+
 def get_timestamp():
     return datetime.now(timezone.utc).isoformat()
+
+_audit_lock = threading.Lock()
 
 def append_audit(entry: dict):
     audit_file = BASE_DIR / "audit" / "audit.log"
     entry["timestamp"] = get_timestamp()
     entry["id"] = str(uuid.uuid4())[:8]
-    with open(audit_file, "a") as f:
-        f.write(json.dumps(entry) + "\n")
+    with _audit_lock:
+        with open(audit_file, "a") as f:
+            f.write(json.dumps(entry) + "\n")
 
 # ─── Agent Discovery (instant filesystem checks) ────────────────────
 
@@ -144,19 +177,25 @@ def list_brain():
 
 @app.get("/api/brain/{file_name}")
 def get_brain_file(file_name: str):
-    path = BASE_DIR / "brain" / file_name
+    path = safe_child(BASE_DIR / "brain", file_name)
     if not path.exists() or path.is_dir():
         raise HTTPException(404, "File not found")
     return {"name": file_name, "content": read_file(path)}
 
 @app.put("/api/brain/{file_name}")
 def update_brain_file(file_name: str, data: BrainUpdate):
-    path = BASE_DIR / "brain" / file_name
+    path = safe_child(BASE_DIR / "brain", file_name)
     write_file(path, data.content)
     append_audit({"action": "brain_update", "file": file_name})
     return {"status": "ok", "file": file_name}
 
 # ─── Routes: Skills ───────────────────────────────────────────────
+
+def _read_json_safe(path: Path, default):
+    try:
+        return json.loads(path.read_text()) if path.exists() else default
+    except (json.JSONDecodeError, OSError):
+        return default
 
 @app.get("/api/skills")
 def list_skills():
@@ -165,40 +204,34 @@ def list_skills():
         if d.is_dir() and not d.name.startswith("_"):
             skill_md = read_file(d / "SKILL.md")
             learnings = read_file(d / "learnings.md")
-            eval_data = {}
-            eval_path = d / "eval.json"
-            if eval_path.exists():
-                eval_data = json.loads(eval_path.read_text())
-            score_history = []
-            score_path = d / "score-history.json"
-            if score_path.exists():
-                score_history = json.loads(score_path.read_text())
+            eval_data = _read_json_safe(d / "eval.json", {})
+            score_history = _read_json_safe(d / "score-history.json", [])
             skills.append({
                 "name": d.name,
                 "description": skill_md[:200] if skill_md else "",
                 "has_learnings": bool(learnings),
-                "eval_criteria": eval_data.get("criteria", []),
+                "eval_criteria": eval_data.get("criteria", []) if isinstance(eval_data, dict) else [],
                 "scores": score_history,
             })
     return skills
 
 @app.get("/api/skills/{name}")
 def get_skill(name: str):
-    path = BASE_DIR / "skills" / name
+    path = safe_child(BASE_DIR / "skills", name)
     if not path.exists():
         raise HTTPException(404, "Skill not found")
     return {
         "name": name,
         "skill": read_file(path / "SKILL.md"),
         "learnings": read_file(path / "learnings.md"),
-        "eval": json.loads((path / "eval.json").read_text()) if (path / "eval.json").exists() else {},
-        "score_history": json.loads((path / "score-history.json").read_text()) if (path / "score-history.json").exists() else [],
+        "eval": _read_json_safe(path / "eval.json", {}),
+        "score_history": _read_json_safe(path / "score-history.json", []),
         "context": [f.name for f in (path / "context").iterdir()] if (path / "context").exists() else [],
     }
 
 @app.post("/api/skills/{name}/run")
 def run_skill(name: str, req: Optional[SkillRunRequest] = None):
-    path = BASE_DIR / "skills" / name
+    path = safe_child(BASE_DIR / "skills", name)
     if not path.exists():
         raise HTTPException(404, "Skill not found")
 
@@ -281,10 +314,8 @@ def run_skill(name: str, req: Optional[SkillRunRequest] = None):
 
 @app.get("/api/skills/{name}/eval")
 def get_skill_eval(name: str):
-    path = BASE_DIR / "skills" / name / "score-history.json"
-    if not path.exists():
-        return {"scores": []}
-    return {"scores": json.loads(path.read_text())}
+    skill_path = safe_child(BASE_DIR / "skills", name)
+    return {"scores": _read_json_safe(skill_path / "score-history.json", [])}
 
 # ─── Routes: Scheduler ────────────────────────────────────────────
 
@@ -310,10 +341,10 @@ def create_job(job: ScheduleJobRequest):
         "last_run": None,
         "next_run": None,
     }
-    (jobs_dir / f"{job.name.replace(' ', '_')}.json").write_text(
+    (jobs_dir / f"{job_data['id']}.json").write_text(
         json.dumps(job_data, indent=2)
     )
-    append_audit({"action": "job_created", "job": job.name})
+    append_audit({"action": "job_created", "job": job.name, "job_id": job_data["id"]})
     return job_data
 
 @app.delete("/api/scheduler/jobs/{job_id}")
@@ -348,16 +379,16 @@ def get_cost():
     return json.loads(cost_file.read_text())
 
 @app.post("/api/cost/record")
-def record_cost(data: dict):
+def record_cost(data: CostRecord):
     cost_file = BASE_DIR / "data" / "cost-history.json"
     cost_data = json.loads(cost_file.read_text()) if cost_file.exists() else \
         {"entries": [], "daily_totals": {}, "monthly_projection": 0, "free_tier_alerts": []}
     cost_data["entries"].append({
         "timestamp": get_timestamp(),
-        "agent": data.get("agent", "unknown"),
-        "tokens": data.get("tokens", 0),
-        "cost": data.get("cost", 0.0),
-        "model": data.get("model", "unknown"),
+        "agent": data.agent,
+        "tokens": data.tokens,
+        "cost": data.cost,
+        "model": data.model,
     })
     cost_file.write_text(json.dumps(cost_data, indent=2))
     return {"status": "recorded"}
@@ -417,13 +448,35 @@ def create_backup():
     append_audit({"action": "backup_created", "file": backup_file.name})
     return {"status": "ok", "file": backup_file.name, "size": backup_file.stat().st_size}
 
+def _safe_tar_extract(tar: tarfile.TarFile, dest: Path) -> None:
+    """Extract a tar archive after verifying every member resolves inside `dest`."""
+    dest_resolved = dest.resolve()
+    for member in tar.getmembers():
+        # Reject absolute paths, drive letters, devices, symlinks/hardlinks pointing outside dest.
+        if member.name.startswith(("/", "\\")) or ":" in member.name:
+            raise HTTPException(400, f"Unsafe archive entry: {member.name}")
+        target = (dest_resolved / member.name).resolve()
+        if target != dest_resolved and dest_resolved not in target.parents:
+            raise HTTPException(400, f"Archive escapes destination: {member.name}")
+        if member.issym() or member.islnk():
+            link_target = (target.parent / member.linkname).resolve()
+            if dest_resolved not in link_target.parents and link_target != dest_resolved:
+                raise HTTPException(400, f"Unsafe link in archive: {member.name}")
+    # Python 3.12+ supports `filter='data'`; fall back to plain extractall after manual validation.
+    try:
+        tar.extractall(path=dest, filter="data")  # type: ignore[arg-type]
+    except TypeError:
+        tar.extractall(path=dest)
+
 @app.post("/api/backup/restore")
 def restore_backup(data: BackupRestoreRequest):
-    backup_file = BASE_DIR / "backups" / data.file
-    if not backup_file.exists():
+    if not data.file.endswith(".tar.gz"):
+        raise HTTPException(400, "Backup must be a .tar.gz file")
+    backup_file = safe_child(BASE_DIR / "backups", data.file)
+    if not backup_file.exists() or not backup_file.is_file():
         raise HTTPException(404, "Backup file not found")
     with tarfile.open(backup_file, "r:gz") as tar:
-        tar.extractall(path=BASE_DIR)
+        _safe_tar_extract(tar, BASE_DIR)
     append_audit({"action": "backup_restored", "file": data.file})
     return {"status": "restored"}
 
@@ -733,12 +786,25 @@ def kanban_board(status: Optional[str] = None):
     except Exception as e:
         return {"error": str(e), "columns": {}, "total": 0}
 
+def _kanban_task_path(task_id: str) -> Path:
+    validate_id(task_id, "task_id")
+    return safe_child(KANBAN_DIR, f"{task_id}.json")
+
 @app.get("/api/kanban/tasks/{task_id}")
 def kanban_get_task(task_id: str):
-    path = KANBAN_DIR / f"{task_id}.json"
+    path = _kanban_task_path(task_id)
     if not path.exists():
         raise HTTPException(404, "Task not found")
     return json.loads(path.read_text())
+
+@app.delete("/api/kanban/tasks/{task_id}")
+def kanban_delete_task(task_id: str):
+    path = _kanban_task_path(task_id)
+    if not path.exists():
+        raise HTTPException(404, "Task not found")
+    path.unlink()
+    append_audit({"action": "kanban_task_deleted", "task_id": task_id})
+    return {"status": "deleted"}
 
 @app.post("/api/kanban/tasks")
 def kanban_create_task(data: KanbanTaskCreate):
@@ -763,7 +829,7 @@ def kanban_create_task(data: KanbanTaskCreate):
 
 @app.patch("/api/kanban/tasks/{task_id}")
 def kanban_update_task(task_id: str, data: KanbanTaskUpdate):
-    path = KANBAN_DIR / f"{task_id}.json"
+    path = _kanban_task_path(task_id)
     if not path.exists():
         raise HTTPException(404, "Task not found")
     task = json.loads(path.read_text())
@@ -778,7 +844,7 @@ def kanban_update_task(task_id: str, data: KanbanTaskUpdate):
 
 @app.post("/api/kanban/tasks/{task_id}/complete")
 def kanban_complete_task(task_id: str, data: KanbanComplete):
-    path = KANBAN_DIR / f"{task_id}.json"
+    path = _kanban_task_path(task_id)
     if not path.exists():
         raise HTTPException(404, "Task not found")
     task = json.loads(path.read_text())
@@ -792,7 +858,7 @@ def kanban_complete_task(task_id: str, data: KanbanComplete):
 
 @app.post("/api/kanban/tasks/{task_id}/block")
 def kanban_block_task(task_id: str, data: KanbanBlock):
-    path = KANBAN_DIR / f"{task_id}.json"
+    path = _kanban_task_path(task_id)
     if not path.exists():
         raise HTTPException(404, "Task not found")
     task = json.loads(path.read_text())
@@ -805,7 +871,7 @@ def kanban_block_task(task_id: str, data: KanbanBlock):
 
 @app.post("/api/kanban/tasks/{task_id}/unblock")
 def kanban_unblock_task(task_id: str):
-    path = KANBAN_DIR / f"{task_id}.json"
+    path = _kanban_task_path(task_id)
     if not path.exists():
         raise HTTPException(404, "Task not found")
     task = json.loads(path.read_text())
@@ -818,7 +884,7 @@ def kanban_unblock_task(task_id: str):
 
 @app.post("/api/kanban/tasks/{task_id}/comments")
 def kanban_add_comment(task_id: str, data: KanbanCommentCreate):
-    path = KANBAN_DIR / f"{task_id}.json"
+    path = _kanban_task_path(task_id)
     if not path.exists():
         raise HTTPException(404, "Task not found")
     task = json.loads(path.read_text())
@@ -835,7 +901,7 @@ def kanban_add_comment(task_id: str, data: KanbanCommentCreate):
 @app.post("/api/kanban/links")
 def kanban_add_link(data: KanbanLinkCreate):
     for tid in [data.parent_id, data.child_id]:
-        path = KANBAN_DIR / f"{tid}.json"
+        path = _kanban_task_path(tid)
         if not path.exists():
             raise HTTPException(404, f"Task {tid} not found")
         t = json.loads(path.read_text())
@@ -851,7 +917,7 @@ def kanban_add_link(data: KanbanLinkCreate):
 @app.delete("/api/kanban/links")
 def kanban_remove_link(parent_id: str = Query(...), child_id: str = Query(...)):
     for tid in [parent_id, child_id]:
-        path = KANBAN_DIR / f"{tid}.json"
+        path = _kanban_task_path(tid)
         if path.exists():
             t = json.loads(path.read_text())
             t.setdefault("links", [])
@@ -867,7 +933,7 @@ def kanban_dispatch():
 
 @app.post("/api/kanban/tasks/{task_id}/specify")
 def kanban_specify_task(task_id: str):
-    path = KANBAN_DIR / f"{task_id}.json"
+    path = _kanban_task_path(task_id)
     if not path.exists():
         raise HTTPException(404, "Task not found")
     task = json.loads(path.read_text())
@@ -879,7 +945,7 @@ def kanban_specify_task(task_id: str):
 
 @app.post("/api/kanban/tasks/{task_id}/decompose")
 def kanban_decompose_task(task_id: str):
-    path = KANBAN_DIR / f"{task_id}.json"
+    path = _kanban_task_path(task_id)
     if not path.exists():
         raise HTTPException(404, "Task not found")
     task = json.loads(path.read_text())
@@ -988,26 +1054,25 @@ def list_journal_entries():
     except Exception as e:
         return {"entries": [], "error": str(e)}
 
+def _journal_path(entry_date: str) -> Path:
+    if not DATE_RE.match(entry_date):
+        raise HTTPException(400, "Invalid date format (expected YYYY-MM-DD)")
+    return safe_child(JOURNAL_DIR, f"{entry_date}.md")
+
 @app.get("/api/journal/entries/{entry_date}")
 def get_journal_entry(entry_date: str):
-    try:
-        path = JOURNAL_DIR / f"{entry_date}.md"
-        ensure_dir(JOURNAL_DIR)
-        content = path.read_text() if path.exists() else ""
-        return {"date": entry_date, "content": content}
-    except Exception as e:
-        return {"date": entry_date, "content": "", "error": str(e)}
+    ensure_dir(JOURNAL_DIR)
+    path = _journal_path(entry_date)
+    content = path.read_text() if path.exists() else ""
+    return {"date": entry_date, "content": content}
 
 @app.put("/api/journal/entries/{entry_date}")
 def save_journal_entry(entry_date: str, data: JournalSave):
-    try:
-        ensure_dir(JOURNAL_DIR)
-        path = JOURNAL_DIR / f"{entry_date}.md"
-        path.write_text(data.content)
-        append_audit({"action": "journal_saved", "date": entry_date})
-        return {"status": "saved", "date": entry_date}
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    ensure_dir(JOURNAL_DIR)
+    path = _journal_path(entry_date)
+    path.write_text(data.content)
+    append_audit({"action": "journal_saved", "date": entry_date})
+    return {"status": "saved", "date": entry_date}
 
 @app.get("/api/journal/search")
 def search_journal(q: str = Query("")):
@@ -1190,25 +1255,27 @@ def list_sessions():
 
 @app.get("/api/sessions/{session_id}/replay")
 def get_session_replay(session_id: str):
-    try:
-        sessions_dir = Path.home() / ".local" / "share" / "opencode"
-        log_file = sessions_dir / "log" / f"{session_id}.log"
-        if log_file.exists():
-            content = log_file.read_text()
-            lines = content.split("\n")
-            messages = []
-            for line in lines:
-                if "user:" in line.lower() or "assistant:" in line.lower():
-                    messages.append(line)
-            return {
-                "session_id": session_id,
-                "lines": len(lines),
-                "messages": messages[:100],
-                "content": content[:5000],
-            }
+    validate_id(session_id, "session_id")
+    log_dir = (Path.home() / ".local" / "share" / "opencode" / "log").resolve()
+    log_file = safe_child(log_dir, f"{session_id}.log") if log_dir.exists() else None
+    if log_file is None or not log_file.exists():
         return {"session_id": session_id, "messages": [], "content": "Session log not found"}
-    except Exception as e:
+    # Cap read to avoid loading multi-hundred-MB log files into memory.
+    MAX_READ_BYTES = 256 * 1024  # 256 KB is plenty for a 5000-char preview + message scan.
+    try:
+        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read(MAX_READ_BYTES)
+    except OSError as e:
         return {"session_id": session_id, "messages": [], "error": str(e)}
+    lines = content.split("\n")
+    messages = [line for line in lines if "user:" in line.lower() or "assistant:" in line.lower()]
+    return {
+        "session_id": session_id,
+        "lines": len(lines),
+        "messages": messages[:100],
+        "content": content[:5000],
+        "truncated": log_file.stat().st_size > MAX_READ_BYTES,
+    }
 
 # ─── Routes: Dashboard Static Files ──────────────────────────────
 

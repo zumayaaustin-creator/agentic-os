@@ -24,7 +24,7 @@ async function renderLearningAnalytics() {
   try {
     const [skillData, trendData] = await Promise.all([api.getSkillAnalytics(), api.getTrendAnalytics()]);
     const skills = skillData.skills || [];
-    const trends = trendData.trends || {};
+    const trends = Array.isArray(trendData.trends) ? trendData.trends : [];
     const grid = document.getElementById('skillScoresGrid');
     if (grid) {
       if (skills.length === 0) {
@@ -50,12 +50,12 @@ async function renderLearningAnalytics() {
     }
     const trendSection = document.getElementById('trendCharts');
     if (trendSection) {
-      const trendEntries = Object.entries(trends).slice(0, 4);
-      if (trendEntries.length === 0) {
+      const trendItems = trends.slice(0, 4);
+      if (trendItems.length === 0) {
         trendSection.innerHTML = `<div class="empty-state" style="grid-column:1/-1"><div class="empty-state-icon">📈</div><div class="empty-state-title">No trend data</div><div class="empty-state-desc">Trends will appear after multiple evaluations</div></div>`;
       } else {
-        trendSection.innerHTML = trendEntries.map(([name, history]) => {
-          const vals = (history || []).slice(-10);
+        trendSection.innerHTML = trendItems.map(({ name, scores }) => {
+          const vals = (Array.isArray(scores) ? scores : []).slice(-10);
           const maxVal = Math.max(...vals, 0.01);
           const chartHeight = 120;
           return `

@@ -2,6 +2,18 @@ const pageCache = {};
 
 const PAGE_BASE = '/dashboard/pages/';
 
+// Cleanup functions registered by pages (timers, listeners) and flushed on navigation.
+window.__pageCleanups = window.__pageCleanups || [];
+function registerPageCleanup(fn) {
+  if (typeof fn === 'function') window.__pageCleanups.push(fn);
+}
+function runPageCleanups() {
+  const fns = window.__pageCleanups.splice(0);
+  for (const fn of fns) {
+    try { fn(); } catch { /* ignore */ }
+  }
+}
+
 async function loadPage(name) {
   if (pageCache[name]) return pageCache[name];
   try {
@@ -31,6 +43,8 @@ async function navigate(page) {
   // Show loading bar
   const bar = document.getElementById('topLoadingBar');
   if (bar) { bar.classList.add('active'); bar.style.width = '30%'; }
+
+  runPageCleanups();
 
   document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
   const navItem = document.querySelector(`[data-page="${hash}"]`);

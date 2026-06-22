@@ -57,6 +57,7 @@ const api = {
   getKanbanTask: (id) => api.get(`/api/kanban/tasks/${encodeURIComponent(id)}`),
   createKanbanTask: (data) => api.post('/api/kanban/tasks', data),
   updateKanbanTask: (id, data) => api.patch(`/api/kanban/tasks/${encodeURIComponent(id)}`, data),
+  deleteKanbanTask: (id) => api.del(`/api/kanban/tasks/${encodeURIComponent(id)}`),
   completeKanbanTask: (id, summary) => api.post(`/api/kanban/tasks/${encodeURIComponent(id)}/complete`, { summary }),
   blockKanbanTask: (id, reason) => api.post(`/api/kanban/tasks/${encodeURIComponent(id)}/block`, { reason }),
   unblockKanbanTask: (id) => api.post(`/api/kanban/tasks/${encodeURIComponent(id)}/unblock`, {}),

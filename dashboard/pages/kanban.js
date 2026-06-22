@@ -206,8 +206,17 @@ async function onKanbanDrop(e, status) {
   }
 }
 
+function findKanbanTask(id) {
+  const cols = kanbanData?.columns || {};
+  for (const tasks of Object.values(cols)) {
+    const t = (tasks || []).find(t => t.id === id);
+    if (t) return t;
+  }
+  return null;
+}
+
 function showKanbanDetail(id) {
-  const task = kanbanData?.tasks?.find(t => t.id === id);
+  const task = findKanbanTask(id);
   if (!task) return;
   const modal = document.getElementById('modalContainer');
   modal.innerHTML = `

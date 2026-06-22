@@ -31,6 +31,8 @@ async function renderAgentHealth() {
   if (document.getElementById('healthAutoRefresh')?.checked) {
     startHealthAutoRefresh();
   }
+  // Ensure auto-refresh is torn down when the user navigates away.
+  registerPageCleanup(stopHealthAutoRefresh);
 }
 
 function startHealthAutoRefresh() {
