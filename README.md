@@ -91,11 +91,24 @@ A locally-hosted operating system for AI agents — an open-source GitHub reposi
 
 ## 🚀 Quick Start
 
+### Linux/macOS
+
 ```bash
 git clone https://github.com/modimihir07/agentic-os.git
 cd agentic-os
-chmod +x install.sh && ./install.sh
+chmod +x install.sh start.sh
+./install.sh
 ./start.sh
+# Open http://127.0.0.1:8080
+```
+
+### Windows PowerShell
+
+```powershell
+git clone https://github.com/modimihir07/agentic-os.git
+cd agentic-os
+.\install.ps1
+.\start.ps1
 # Open http://127.0.0.1:8080
 ```
 
