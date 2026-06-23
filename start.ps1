@@ -20,11 +20,17 @@ function Find-Python {
         if (-not $command) { continue }
 
         try {
-            & $candidate.Command @($candidate.Arguments + @("--version")) *> $null
-            if ($LASTEXITCODE -eq 0) {
-                return [pscustomobject]@{
-                    Command = $candidate.Command
-                    Arguments = $candidate.Arguments
+            $versionOutput = & $candidate.Command @($candidate.Arguments + @("--version")) 2>&1
+            if ($LASTEXITCODE -ne 0) { continue }
+            $versionText = ($versionOutput | Select-Object -First 1).ToString()
+            if ($versionText -match 'Python\s+(\d+)\.(\d+)') {
+                $major = [int]$matches[1]
+                $minor = [int]$matches[2]
+                if ($major -gt 3 -or ($major -eq 3 -and $minor -ge 10)) {
+                    return [pscustomobject]@{
+                        Command = $candidate.Command
+                        Arguments = $candidate.Arguments
+                    }
                 }
             }
         } catch {
