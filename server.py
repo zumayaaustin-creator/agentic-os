@@ -26,12 +26,37 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from data.db import (
+    db_get_audit,
+    db_get_chat_messages,
+    db_get_cost_entries,
+    db_get_kanban_task,
+    db_get_kanban_tasks,
+    db_get_goals,
+    db_get_plugins,
+    db_get_settings,
+    db_get_scheduler_jobs,
+    db_insert_audit,
+    db_insert_chat_message,
+    db_insert_cost_entry,
+    db_delete_goal,
+    db_delete_kanban_task,
+    db_delete_scheduler_job,
+    db_upsert_kanban_task,
+    db_upsert_goal,
+    db_upsert_plugin,
+    db_upsert_scheduler_job,
+    db_set_setting,
+    init_db,
+)
+
 BASE_DIR = Path(__file__).parent.resolve()
 
 # Agents supported across chat, routing, health, and kanban dispatch.
 AGENTS = ["opencode", "hermes", "gemini"]
 
 app = FastAPI(title="Agentic OS", version="1.1.0")
+init_db()
 
 # Load OpenRouter API key from Hermes .env
 HERMES_ENV = Path.home() / ".hermes" / ".env"
@@ -46,14 +71,11 @@ if HERMES_ENV.exists():
 def get_cors_origins() -> list[str]:
     """Return local dashboard origins allowed to call the API."""
     port = 8080
-    settings_file = BASE_DIR / "data" / "settings.json"
-
-    if settings_file.exists():
-        try:
-            settings = json.loads(settings_file.read_text(encoding="utf-8"))
-            port = int(settings.get("dashboard", {}).get("port", port))
-        except (json.JSONDecodeError, OSError, TypeError, ValueError):
-            port = 8080
+    try:
+        settings = db_get_settings()
+        port = int(settings.get("dashboard", {}).get("port", port))
+    except Exception:
+        port = 8080
 
     origins = {
         "http://127.0.0.1:8080",
@@ -172,16 +194,11 @@ def get_timestamp():
     return datetime.now(timezone.utc).isoformat()
 
 def append_audit(entry: dict):
-    audit_file = BASE_DIR / "audit" / "audit.log"
     entry["timestamp"] = get_timestamp()
     entry["id"] = new_id()
     try:
-        audit_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(audit_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
-    except OSError as e:
-        # Auditing is best-effort: never let a logging failure abort the
-        # underlying operation, but surface it on the server console.
+        db_insert_audit(entry)
+    except Exception as e:
         print(f"[audit] failed to write entry {entry.get('action')!r}: {e}")
 
 # ─── Agent Discovery (instant filesystem checks) ────────────────────
@@ -494,18 +511,11 @@ def get_skill_eval(name: str):
 
 @app.get("/api/scheduler/jobs")
 def list_jobs():
-    jobs_dir = BASE_DIR / "scheduler" / "jobs"
-    jobs = []
-    for f in sorted(jobs_dir.glob("*.json")):
-        job = read_json(f, default=None, best_effort=True)
-        if job is not None:
-            jobs.append(job)
+    jobs = db_get_scheduler_jobs()
     return jobs
 
 @app.post("/api/scheduler/jobs")
 def create_job(job: ScheduleJobRequest):
-    jobs_dir = BASE_DIR / "scheduler" / "jobs"
-    jobs_dir.mkdir(parents=True, exist_ok=True)
     job_data = {
         "id": new_id(),
         "name": job.name,
@@ -516,85 +526,62 @@ def create_job(job: ScheduleJobRequest):
         "last_run": None,
         "next_run": None,
     }
-    (jobs_dir / f"{job.name.replace(' ', '_')}.json").write_text(
-        json.dumps(job_data, indent=2)
-    )
+    db_upsert_scheduler_job(job_data)
     append_audit({"action": "job_created", "job": job.name})
     return job_data
 
 @app.delete("/api/scheduler/jobs/{job_id}")
 def delete_job(job_id: str):
-    jobs_dir = BASE_DIR / "scheduler" / "jobs"
-    for f in jobs_dir.glob("*.json"):
-        data = read_json(f, default=None, best_effort=True)
-        if data and data.get("id") == job_id:
-            f.unlink()
-            append_audit({"action": "job_deleted", "job_id": job_id})
-            return {"status": "deleted"}
-    raise HTTPException(404, "Job not found")
+    jobs = db_get_scheduler_jobs()
+    if not any(j.get("id") == job_id for j in jobs):
+        raise HTTPException(404, "Job not found")
+    db_delete_scheduler_job(job_id)
+    append_audit({"action": "job_deleted", "job_id": job_id})
+    return {"status": "deleted"}
 
 # ─── Routes: Audit ────────────────────────────────────────────────
 
 @app.get("/api/audit")
 def get_audit(limit: int = Query(100, le=500)):
-    audit_file = BASE_DIR / "audit" / "audit.log"
-    if not audit_file.exists():
-        return {"entries": []}
-    lines = audit_file.read_text().strip().split("\n")
-    entries = []
-    for l in lines:
-        if not l.strip():
-            continue
-        try:
-            entries.append(json.loads(l))
-        except json.JSONDecodeError:
-            # Skip a corrupt line rather than failing the whole audit view.
-            continue
-    return {"entries": entries[-limit:]}
+    return {"entries": db_get_audit(limit=limit)}
 
 # ─── Routes: Cost Analytics ───────────────────────────────────────
 
 @app.get("/api/cost")
 def get_cost():
-    cost_file = BASE_DIR / "data" / "cost-history.json"
-    return read_json(cost_file, {"entries": [], "daily_totals": {}, "monthly_projection": 0, "free_tier_alerts": []})
+    entries = db_get_cost_entries()
+    return {"entries": entries, "daily_totals": {}, "monthly_projection": 0, "free_tier_alerts": []}
 
 @app.post("/api/cost/record")
 def record_cost(data: dict):
-    cost_file = BASE_DIR / "data" / "cost-history.json"
-    cost_data = read_json(cost_file, {"entries": [], "daily_totals": {}, "monthly_projection": 0, "free_tier_alerts": []})
-    cost_data["entries"].append({
+    db_insert_cost_entry({
         "timestamp": get_timestamp(),
         "agent": data.get("agent", "unknown"),
         "tokens": data.get("tokens", 0),
         "cost": data.get("cost", 0.0),
         "model": data.get("model", "unknown"),
     })
-    write_json(cost_file, cost_data)
     return {"status": "recorded"}
 
 # ─── Routes: Registry/Plugins ─────────────────────────────────────
 
 @app.get("/api/plugins")
 def list_plugins():
-    reg_file = BASE_DIR / "registry" / "plugins.json"
-    return read_json(reg_file, {"plugins": []})
+    return {"plugins": db_get_plugins()}
 
 @app.post("/api/plugins/install")
 def install_plugin(data: dict):
     name = data.get("name", "").strip()
     if not name:
         raise HTTPException(400, "Plugin name required")
-    reg_file = BASE_DIR / "registry" / "plugins.json"
-    reg = read_json(reg_file, {"plugins": []})
-    if any(p["name"] == name for p in reg["plugins"]):
+    existing = db_get_plugins()
+    if any(p["name"] == name for p in existing):
         return {"status": "already_installed"}
-    reg["plugins"].append({
+    db_upsert_plugin({
         "name": name,
         "installed": get_timestamp(),
         "version": "1.0.0",
     })
-    write_json(reg_file, reg)
     append_audit({"action": "plugin_installed", "plugin": name})
     return {"status": "installed", "plugin": name}
 
@@ -679,16 +666,14 @@ def list_prompts():
 
 @app.get("/api/settings")
 def get_settings():
-    sf = BASE_DIR / "data" / "settings.json"
-    return read_json(sf, {})
+    return db_get_settings()
 
 @app.put("/api/settings")
 def update_settings(data: SettingsUpdate):
-    sf = BASE_DIR / "data" / "settings.json"
-    # Merge with existing
-    existing = read_json(sf, {})
+    existing = db_get_settings()
     existing.update(data.settings)
-    write_json(sf, existing)
+    for k, v in existing.items():
+        db_set_setting(k, v)
     append_audit({"action": "settings_updated"})
     return {"status": "ok"}
 
@@ -720,14 +705,10 @@ def discover_standards():
 CHAT_HISTORY_FILE = BASE_DIR / "data" / "chat-history.json"
 
 def load_chat_history():
-    return read_json(CHAT_HISTORY_FILE, {"messages": []})
+    return {"messages": db_get_chat_messages(limit=200)}
 
 def save_chat_message(msg: dict):
-    history = load_chat_history()
-    history["messages"].append(msg)
-    if len(history["messages"]) > 200:
-        history["messages"] = history["messages"][-200:]
-    write_json(CHAT_HISTORY_FILE, history)
+    db_insert_chat_message(msg)
 
 def run_cli(args: list, timeout: int = 30) -> tuple:
     r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
@@ -1056,13 +1037,7 @@ def ensure_dir(d: Path):
     d.mkdir(parents=True, exist_ok=True)
 
 def load_kanban_tasks():
-    ensure_dir(KANBAN_DIR)
-    tasks = []
-    for f in sorted(KANBAN_DIR.glob("*.json")):
-        task = read_json(f, default=None, best_effort=True)
-        if task is not None:
-            tasks.append(task)
-    return tasks
+    return db_get_kanban_tasks()
 
 KANBAN_ID_RE = re.compile(r"^[0-9a-f]{6,16}$")
 
@@ -1077,17 +1052,15 @@ def kanban_task_path(task_id: str) -> Path:
     return candidate
 
 def save_kanban_task(task: dict):
-    ensure_dir(KANBAN_DIR)
-    kanban_task_path(task["id"]).write_text(json.dumps(task, indent=2))
+    db_upsert_kanban_task(task)
 
 KANBAN_AGENTS = set(AGENTS)
 
 def dispatch_kanban_task(task_id: str):
     """Move a task to in_progress and hand it to its assignee agent in the background."""
-    path = kanban_task_path(task_id)
-    if not path.exists():
+    task = db_get_kanban_task(task_id)
+    if not task:
         return
-    task = json.loads(path.read_text())
     if task.get("status") in ("in_progress", "done"):
         return
     if task.get("assignee") not in KANBAN_AGENTS:
@@ -1103,17 +1076,16 @@ def _run_kanban_agent(task_id: str):
     # the task stuck in "in_progress" forever, so catch failures and surface
     # them by marking the task blocked with the error.
     try:
-        path = kanban_task_path(task_id)
-        if not path.exists():
+        task = db_get_kanban_task(task_id)
+        if not task:
             return
-        task = json.loads(path.read_text())
         agent = task.get("assignee")
         prompt = task["title"] if not task.get("body") else f"{task['title']}\n\n{task['body']}"
 
         response = execute_agent(agent, prompt)
         failed = response.startswith(("⏱", "⚠", "Unknown agent"))
 
-        task = json.loads(path.read_text())  # reload in case it changed while the agent ran
+        task = db_get_kanban_task(task_id)  # reload in case it changed while the agent ran
         task.setdefault("comments", []).append({
             "id": new_id(),
             "message": f"🤖 **{agent}**\n\n{response}",
@@ -1133,21 +1105,21 @@ def _run_kanban_agent(task_id: str):
     except Exception as e:
         print(f"[kanban] dispatch for task {task_id} crashed: {e}")
         try:
-            path = kanban_task_path(task_id)
-            task = json.loads(path.read_text())
-            task["status"] = "blocked"
-            task["block_reason"] = f"Dispatch crashed: {e}"[:300]
-            task["updated"] = get_timestamp()
-            save_kanban_task(task)
-            append_audit({"action": "kanban_task_dispatch_error", "task_id": task_id, "error": str(e)[:200]})
+            task = db_get_kanban_task(task_id)
+            if task:
+                task["status"] = "blocked"
+                task["block_reason"] = f"Dispatch crashed: {e}"[:300]
+                task["updated"] = get_timestamp()
+                save_kanban_task(task)
+                append_audit({"action": "kanban_task_dispatch_error", "task_id": task_id, "error": str(e)[:200]})
         except Exception as inner:
             print(f"[kanban] could not mark task {task_id} as blocked: {inner}")
 
 def load_goals():
-    return read_json(GOALS_FILE, [])
+    return db_get_goals()
 
 def save_goals(goals: list):
-    write_json(GOALS_FILE, goals)
+    pass
 
 # ─── Routes: Kanban Board (13 endpoints) ────────────────────────
 
@@ -1168,17 +1140,16 @@ def kanban_board(status: Optional[str] = None):
 
 @app.get("/api/kanban/tasks/{task_id}")
 def kanban_get_task(task_id: str):
-    path = kanban_task_path(task_id)
-    if not path.exists():
+    task = db_get_kanban_task(task_id)
+    if not task:
         raise HTTPException(404, "Task not found")
-    return json.loads(path.read_text())
+    return task
 
 @app.delete("/api/kanban/tasks/{task_id}")
 def kanban_delete_task(task_id: str):
-    path = kanban_task_path(task_id)
-    if not path.exists():
+    if not db_get_kanban_task(task_id):
         raise HTTPException(404, "Task not found")
-    path.unlink()
+    db_delete_kanban_task(task_id)
     append_audit({"action": "kanban_task_deleted", "task_id": task_id})
     return {"status": "deleted", "task_id": task_id}
 
@@ -1201,17 +1172,16 @@ def kanban_create_task(data: KanbanTaskCreate):
         append_audit({"action": "kanban_task_created", "title": data.title})
         if task["assignee"] in KANBAN_AGENTS:
             dispatch_kanban_task(task["id"])
-            task = json.loads(kanban_task_path(task["id"]).read_text())
+            task = db_get_kanban_task(task["id"]) or task
         return task
     except Exception as e:
         raise HTTPException(500, str(e))
 
 @app.patch("/api/kanban/tasks/{task_id}")
 def kanban_update_task(task_id: str, data: KanbanTaskUpdate):
-    path = kanban_task_path(task_id)
-    if not path.exists():
+    task = db_get_kanban_task(task_id)
+    if not task:
         raise HTTPException(404, "Task not found")
-    task = json.loads(path.read_text())
     assignee_changed = data.assignee is not None and data.assignee != task.get("assignee")
     for field in ["title", "body", "status", "priority", "assignee"]:
         val = getattr(data, field, None)
@@ -1222,15 +1192,14 @@ def kanban_update_task(task_id: str, data: KanbanTaskUpdate):
     append_audit({"action": "kanban_task_updated", "task_id": task_id})
     if assignee_changed and task["assignee"] in KANBAN_AGENTS:
         dispatch_kanban_task(task_id)
-        task = json.loads(path.read_text())
+        task = db_get_kanban_task(task_id) or task
     return task
 
 @app.post("/api/kanban/tasks/{task_id}/dispatch")
 def kanban_dispatch_task(task_id: str):
-    path = kanban_task_path(task_id)
-    if not path.exists():
+    task = db_get_kanban_task(task_id)
+    if not task:
         raise HTTPException(404, "Task not found")
-    task = json.loads(path.read_text())
     if task.get("assignee") not in KANBAN_AGENTS:
         raise HTTPException(400, "Task must be assigned to opencode, hermes, or gemini to dispatch")
     dispatch_kanban_task(task_id)
@@ -1238,10 +1207,9 @@ def kanban_dispatch_task(task_id: str):
 
 @app.post("/api/kanban/tasks/{task_id}/complete")
 def kanban_complete_task(task_id: str, data: KanbanComplete):
-    path = kanban_task_path(task_id)
-    if not path.exists():
+    task = db_get_kanban_task(task_id)
+    if not task:
         raise HTTPException(404, "Task not found")
-    task = json.loads(path.read_text())
     task["status"] = "done"
     task["summary"] = data.summary
     task["completed_at"] = get_timestamp()
@@ -1252,10 +1220,9 @@ def kanban_complete_task(task_id: str, data: KanbanComplete):
 
 @app.post("/api/kanban/tasks/{task_id}/block")
 def kanban_block_task(task_id: str, data: KanbanBlock):
-    path = kanban_task_path(task_id)
-    if not path.exists():
+    task = db_get_kanban_task(task_id)
+    if not task:
         raise HTTPException(404, "Task not found")
-    task = json.loads(path.read_text())
     task["status"] = "blocked"
     task["block_reason"] = data.reason
     task["updated"] = get_timestamp()
@@ -1265,10 +1232,9 @@ def kanban_block_task(task_id: str, data: KanbanBlock):
 
 @app.post("/api/kanban/tasks/{task_id}/unblock")
 def kanban_unblock_task(task_id: str):
-    path = kanban_task_path(task_id)
-    if not path.exists():
+    task = db_get_kanban_task(task_id)
+    if not task:
         raise HTTPException(404, "Task not found")
-    task = json.loads(path.read_text())
     task["status"] = "ready"
     task["block_reason"] = ""
     task["updated"] = get_timestamp()
@@ -1278,10 +1244,9 @@ def kanban_unblock_task(task_id: str):
 
 @app.post("/api/kanban/tasks/{task_id}/comments")
 def kanban_add_comment(task_id: str, data: KanbanCommentCreate):
-    path = kanban_task_path(task_id)
-    if not path.exists():
+    task = db_get_kanban_task(task_id)
+    if not task:
         raise HTTPException(404, "Task not found")
-    task = json.loads(path.read_text())
     comment = {
         "id": new_id(),
         "message": data.message,
@@ -1295,10 +1260,9 @@ def kanban_add_comment(task_id: str, data: KanbanCommentCreate):
 @app.post("/api/kanban/links")
 def kanban_add_link(data: KanbanLinkCreate):
     for tid in [data.parent_id, data.child_id]:
-        path = kanban_task_path(tid)
-        if not path.exists():
+        t = db_get_kanban_task(tid)
+        if not t:
             raise HTTPException(404, f"Task {tid} not found")
-        t = json.loads(path.read_text())
         t.setdefault("links", [])
         link = {"parent": data.parent_id, "child": data.child_id}
         if link not in t["links"]:
@@ -1311,9 +1275,8 @@ def kanban_add_link(data: KanbanLinkCreate):
 @app.delete("/api/kanban/links")
 def kanban_remove_link(parent_id: str = Query(...), child_id: str = Query(...)):
     for tid in [parent_id, child_id]:
-        path = kanban_task_path(tid)
-        if path.exists():
-            t = json.loads(path.read_text())
+        t = db_get_kanban_task(tid)
+        if t:
             t.setdefault("links", [])
             t["links"] = [l for l in t["links"] if not (l.get("parent") == parent_id and l.get("child") == child_id)]
             t["updated"] = get_timestamp()
@@ -1332,10 +1295,9 @@ def kanban_dispatch():
 
 @app.post("/api/kanban/tasks/{task_id}/specify")
 def kanban_specify_task(task_id: str):
-    path = kanban_task_path(task_id)
-    if not path.exists():
+    task = db_get_kanban_task(task_id)
+    if not task:
         raise HTTPException(404, "Task not found")
-    task = json.loads(path.read_text())
     if task.get("status") == "triage":
         task["status"] = "todo"
         task["updated"] = get_timestamp()
@@ -1344,10 +1306,9 @@ def kanban_specify_task(task_id: str):
 
 @app.post("/api/kanban/tasks/{task_id}/decompose")
 def kanban_decompose_task(task_id: str):
-    path = kanban_task_path(task_id)
-    if not path.exists():
+    task = db_get_kanban_task(task_id)
+    if not task:
         raise HTTPException(404, "Task not found")
-    task = json.loads(path.read_text())
     children = []
     for i, subtask in enumerate(task.get("body", "").split("\n")):
         subtask = subtask.strip().lstrip("-* ")
@@ -1371,17 +1332,9 @@ def kanban_decompose_task(task_id: str):
 
 # ─── Routes: Goals (4 endpoints) ─────────────────────────────────
 
-@app.get("/api/goals")
-def list_goals():
-    try:
-        return {"goals": load_goals()}
-    except Exception as e:
-        return {"goals": [], "error": str(e)}
-
 @app.post("/api/goals")
 def create_goal(data: GoalCreate):
     try:
-        goals = load_goals()
         goal = {
             "id": new_id(),
             "title": data.title,
@@ -1393,15 +1346,13 @@ def create_goal(data: GoalCreate):
             "created": get_timestamp(),
             "updated": get_timestamp(),
         }
-        goals.append(goal)
-        save_goals(goals)
-        # Auto-sync to brain/active-projects.md
+        db_upsert_goal(goal)
+        append_audit({"action": "goal_created", "title": data.title})
         active_path = BASE_DIR / "brain" / "active-projects.md"
         if active_path.exists():
             existing = active_path.read_text()
             existing += f"\n- [{goal['title']}](goal:{goal['id']}) — {goal['description'][:80]}\n"
             active_path.write_text(existing)
-        append_audit({"action": "goal_created", "title": data.title})
         return goal
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -1409,17 +1360,21 @@ def create_goal(data: GoalCreate):
 @app.put("/api/goals/{goal_id}")
 def update_goal(goal_id: str, data: GoalUpdate):
     try:
-        goals = load_goals()
+        goals = db_get_goals()
+        goal = None
         for g in goals:
             if g["id"] == goal_id:
-                for field in ["title", "description", "category", "target_date", "progress", "status"]:
-                    val = getattr(data, field, None)
-                    if val is not None:
-                        g[field] = val
-                g["updated"] = get_timestamp()
-                save_goals(goals)
-                return g
-        raise HTTPException(404, "Goal not found")
+                goal = g
+                break
+        if not goal:
+            raise HTTPException(404, "Goal not found")
+        for field in ["title", "description", "category", "target_date", "progress", "status"]:
+            val = getattr(data, field, None)
+            if val is not None:
+                goal[field] = val
+        goal["updated"] = get_timestamp()
+        db_upsert_goal(goal)
+        return goal
     except HTTPException:
         raise
     except Exception as e:
@@ -1428,9 +1383,7 @@ def update_goal(goal_id: str, data: GoalUpdate):
 @app.delete("/api/goals/{goal_id}")
 def delete_goal(goal_id: str):
     try:
-        goals = load_goals()
-        goals = [g for g in goals if g["id"] != goal_id]
-        save_goals(goals)
+        db_delete_goal(goal_id)
         append_audit({"action": "goal_deleted", "goal_id": goal_id})
         return {"status": "deleted"}
     except Exception as e:
