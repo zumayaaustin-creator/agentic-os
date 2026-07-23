@@ -487,7 +487,10 @@ def run_skill(name: str, req: Optional[SkillRunRequest] = None):
 
 @app.get("/api/skills/{name}/eval")
 def get_skill_eval(name: str):
-    path = resolve_skill_dir(name) / "score-history.json"
+    try:
+        path = resolve_skill_dir(name) / "score-history.json"
+    except HTTPException:
+        return {"scores": []}
     return {"scores": read_json(path, default=[])}
 
 # ─── Routes: Scheduler ────────────────────────────────────────────

@@ -1,5 +1,6 @@
 """Endpoint tests for ``server.py`` exercised through FastAPI's TestClient."""
 import json
+import os
 
 import pytest
 
@@ -235,24 +236,35 @@ def test_chat_records_history(client, server_module, monkeypatch):
     assert history[1]["role"] == "assistant"
 
 
-# ─── Terminal ──────────────────────────────────────────────────────
+# ─── Terminal (interactive PTY over WebSocket) ─────────────────────
 
-def test_terminal_session_and_blank_command(client, server_module):
-    assert client.get("/api/terminal/session").json()["cwd"]
-    r = client.post("/api/terminal/run", json={"command": "   "})
-    assert r.json()["returncode"] == 0
+_ALLOWED_ORIGIN = "http://localhost:8080"
 
 
-def test_terminal_cd_invalid_dir(client):
-    r = client.post("/api/terminal/run", json={"command": "cd /this/does/not/exist"})
-    assert r.json()["returncode"] == 1
-    assert "no such directory" in r.json()["stderr"]
+def test_terminal_ws_rejects_disallowed_origin(client):
+    from starlette.websockets import WebSocketDisconnect
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            "/ws/terminal", headers={"origin": "http://evil.example"}
+        ) as ws:
+            ws.receive_json()
 
 
-def test_terminal_run_echo(client):
-    r = client.post("/api/terminal/run", json={"command": "echo hello-term"})
-    assert r.json()["returncode"] == 0
-    assert "hello-term" in r.json()["stdout"]
+@pytest.mark.skipif(os.name == "nt", reason="POSIX pty echo behaviour")
+def test_terminal_ws_echo_roundtrip(client):
+    marker = "hello-term-marker"
+    with client.websocket_connect(
+        "/ws/terminal", headers={"origin": _ALLOWED_ORIGIN}
+    ) as ws:
+        ws.send_json({"type": "input", "data": f"echo {marker}\n"})
+        buf = ""
+        for _ in range(50):
+            msg = ws.receive_json()
+            buf += msg.get("data", "")
+            if buf.count(marker) >= 2:  # echoed command line + command output
+                break
+    assert marker in buf
 
 
 # ─── Goals ─────────────────────────────────────────────────────────
