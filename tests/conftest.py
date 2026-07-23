@@ -38,7 +38,6 @@ def server_module(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "JOURNAL_DIR", base / "brain" / "journal")
     monkeypatch.setattr(server, "CHAT_HISTORY_FILE",
                         base / "data" / "chat-history.json")
-    monkeypatch.setattr(server, "_terminal_cwd", str(base))
 
     return server
 
